@@ -1,0 +1,17 @@
+{
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "按时间段导出 Telegram 聊天"
+  },
+  "description": "在 Telegram 网页版按精确时间段导出聊天记录为 JSON",
+  "host_permissions": [
+    "https://web.telegram.org/*"
+  ],
+  "manifest_version": 3,
+  "name": "Telegram 按时间段导出",
+  "permissions": [
+    "scripting",
+    "activeTab"
+  ],
+  "version": "1.2.0"
+}
