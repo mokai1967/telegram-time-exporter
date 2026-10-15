@@ -1,5 +1,6 @@
-/* Telegram 按时间段导出 v1.2.0
+/* Telegram 按时间段导出 v1.3.1
  * 注入到 web.telegram.org 页面中运行：按用户指定的精确时间段收集消息，打包下载 JSON。
+ * 支持 A 版（web.telegram.org/a，.Message）和 K 版（web.telegram.org/k，.bubble）两种网页版。
  * 在浏览器里：popup 通过 chrome.scripting 先写入 window.__tgexport_cfg 再注入本文件，自动运行。
  * 在 Node 里：require 本文件可做单元测试（纯逻辑部分），不会触碰 DOM。
  */
@@ -155,6 +156,23 @@ function minCertainTs(seen) {
   return min;
 }
 
+/* 完整性检查：抓到的最早消息离用户设定的开始时间差多远。
+ * 返回 {ok, reason, gapMinutes, count}。
+ * - empty：一条都没抓到（可能聊天没打开、消息没加载出来）
+ * - gap：停在了半路，最早的消息比开始时间晚了 30 分钟以上（页面很可能没加载完历史）
+ * - ok：正常到达开始时间附近 */
+function assessCoverage(seen, fromMs) {
+  let min = null, n = 0;
+  seen.forEach(function (m) {
+    n++;
+    if (min === null || m.tsMs < min) min = m.tsMs;
+  });
+  if (n === 0) return { ok: false, reason: 'empty', gapMinutes: null, count: 0 };
+  const gapMin = Math.round((min - fromMs) / 60000);
+  if (gapMin > 30) return { ok: false, reason: 'gap', gapMinutes: gapMin, count: n };
+  return { ok: true, reason: 'ok', gapMinutes: gapMin, count: n };
+}
+
 /* ================= 浏览器部分 ================= */
 
 function textOf(el, selector) {
@@ -171,7 +189,7 @@ function adaptNode(el, nowMs) {
 
   if (el.__tgexport_divider) return { isDivider: true, dividerText: rawText };
   if (has('is-date')) return { isDivider: true, dividerText: rawText };
-  if (has('service')) {
+  if (has('service') || has('is-service')) {
     // 有的版本日期分隔条是 service 样式：能解析出日期就是分隔条，否则跳过
     if (parseDividerText(rawText, nowMs) !== null) return { isDivider: true, dividerText: rawText };
     return { skip: true };
@@ -185,17 +203,18 @@ function adaptNode(el, nowMs) {
   }
   if (!sender) sender = null; // 分组续泡没名字：由 walkNodes 按上一条继承，不猜"我"
 
-  // 是否本人的消息：自己的气泡通常带 own 标记（启发式，宁可漏判不误判）
+  // 是否本人的消息：自己的气泡通常带 own/is-own 标记；K 版用 is-out（启发式，宁可漏判不误判）
   let isOwn = false;
   if (cl) {
     for (let i = 0; i < cl.length; i++) {
       const c = cl[i];
-      if (c === 'is-own' || c === 'own' || /(^|-)own(-|$)/i.test(c)) { isOwn = true; break; }
+      if (c === 'is-own' || c === 'own' || c === 'is-out' || /(^|-)own(-|$)/i.test(c)) { isOwn = true; break; }
     }
   }
 
   let text = textOf(el, '.text-content');
   if (!text) text = textOf(el, '.message-content');
+  if (!text) text = textOf(el, '.message'); // K 版消息正文容器
   if (!text) {
     const p = el.querySelector('p');
     if (p && p.innerText) text = p.innerText.trim();
@@ -234,7 +253,7 @@ function adaptNode(el, nowMs) {
     clockText = (timeEl.innerText || '').trim();
   }
 
-  const mid = el.getAttribute ? (el.getAttribute('data-message-id') || el.getAttribute('id')) : null;
+  const mid = el.getAttribute ? (el.getAttribute('data-message-id') || el.getAttribute('data-mid') || el.getAttribute('id')) : null;
   const key = mid ? 'mid_' + mid : ('k_' + (sender || '?') + '_' + text.slice(0, 60) + '_' + clockText);
   return { key: key, sender: sender, isOwn: isOwn, text: text, clockText: clockText, fullMs: fullMs };
 }
@@ -250,12 +269,12 @@ function parseTitleDate(s) {
   return null;
 }
 
-/* 优先找自带完整时间的 <time> 元素 */
+/* 优先找自带完整时间的 <time> 元素（A 版）；K 版时间是 <span class="time">，带 title 或 data-timestamp */
 function findTimeEl(el) {
   if (!el || !el.querySelector) return null;
   return el.querySelector('time[datetime]') || el.querySelector('time[title]') ||
     el.querySelector('time') || el.querySelector('.MessageMeta') ||
-    el.querySelector('[class*="MessageMeta"]');
+    el.querySelector('[class*="MessageMeta"]') || el.querySelector('.time');
 }
 
 /* 找日期分隔条：先试已知选择器，找不到就用文本扫描兜底（不依赖类名）。
@@ -283,7 +302,7 @@ function findDividerEls(scroller, nowMs) {
       let bad = false;
       let depth = 0;
       while (el && el !== scroller && depth < 6) {
-        if (el.classList && el.classList.contains('Message')) { bad = true; break; }
+        if (el.classList && (el.classList.contains('Message') || el.classList.contains('bubble'))) { bad = true; break; }
         el = el.parentElement;
         depth++;
       }
@@ -323,20 +342,35 @@ function mergeInDocOrder(lists) {
 }
 
 function findScroller() {
+  // A 版（web.telegram.org/a）：.MessageList
   const divs = document.querySelectorAll('div');
   for (let i = 0; i < divs.length; i++) {
     const el = divs[i];
     if (el.classList && el.classList.contains('MessageList') &&
         el.scrollHeight > el.clientHeight + 100) return el;
   }
-  // 兜底：找包含消息节点的可滚动容器
-  const msg = document.querySelector('.Message');
+  // K 版（web.telegram.org/k）：.bubbles
+  try {
+    const kb = document.querySelector('.bubbles');
+    if (kb && kb.scrollHeight > kb.clientHeight + 100) return kb;
+  } catch (e) { /* 忽略 */ }
+  // 兜底：从任意消息节点往上找可滚动容器
+  const msg = document.querySelector('.Message') || document.querySelector('.bubble');
   let el = msg;
   while (el && el.parentElement) {
     el = el.parentElement;
     if (el.scrollHeight > el.clientHeight + 100) return el;
   }
   return null;
+}
+
+/* 识别当前是哪个网页版：A 版用 .Message，K 版用 .bubble */
+function detectClient(scroller) {
+  try {
+    if (scroller.querySelector('.Message')) return 'A';
+    if (scroller.querySelector('.bubble')) return 'K';
+  } catch (e) { /* 忽略 */ }
+  return 'A';
 }
 
 function getChatTitle() {
@@ -416,14 +450,18 @@ async function runExport(cfg) {
     const seen = new Map();
     const state = { curDayMs: dayStartMs(Date.now()), sawDivider: false, lastSender: null };
     const nowMs = Date.now();
+    const client = detectClient(scroller);
     const STOP_MARGIN = 10 * 60000;
     const MAX_MSGS = 50000;
-    let stuck = 0, lastCount = 0, rounds = 0;
+    let stuck = 0, lastCount = 0, rounds = 0, stopReason = 'unknown';
 
     while (!cancelled) {
       rounds++;
       // 消息气泡 + 日期分隔条，按文档顺序合并后统一走一遍
-      const msgEls = scroller.querySelectorAll('.Message');
+      // A 版：.Message；K 版：.bubble（去掉日期分隔条，服务消息由 adaptNode 跳过）
+      const msgEls = client === 'K'
+        ? scroller.querySelectorAll('.bubble:not(.is-date)')
+        : scroller.querySelectorAll('.Message');
       const divEls = findDividerEls(scroller, nowMs);
       const ordered = mergeInDocOrder([msgEls, divEls]);
       const nodes = [];
@@ -433,7 +471,7 @@ async function runExport(cfg) {
       mergeSeen(seen, walkNodes(nodes, state, nowMs));
 
       const minC = minCertainTs(seen);
-      let prog = '已收集 ' + seen.size + ' 条' +
+      let prog = '【' + client + ' 版】已收集 ' + seen.size + ' 条' +
         (minC !== null ? '（已翻到 ' + localISO(minC).slice(0, 16).replace('T', ' ') + '）' : '');
       if (!state.sawDivider && rounds > 40) {
         prog += '（暂未识别到日期分隔条，仍在尝试；如长时间无进展可点取消）';
@@ -441,22 +479,22 @@ async function runExport(cfg) {
       overlay.progress(prog);
 
       // 停止条件1：已经翻到比开始时间还早的消息（再往上只会更早）
-      if (minC !== null && minC < fromMs - STOP_MARGIN) break;
+      if (minC !== null && minC < fromMs - STOP_MARGIN) { stopReason = 'reached'; break; }
       // 停止条件2：消息数保护
-      if (seen.size >= MAX_MSGS) break;
+      if (seen.size >= MAX_MSGS) { stopReason = 'max'; break; }
       // 停止条件3：轮数保护
-      if (rounds > 3000) break;
+      if (rounds > 3000) { stopReason = 'rounds'; break; }
 
       const before = scroller.scrollTop;
       scroller.scrollTop = before - Math.floor(scroller.clientHeight * 0.8);
       await sleep(900);
 
       if (scroller.scrollTop <= 0) {
-        if (seen.size === lastCount) { stuck++; if (stuck >= 3) break; }
+        if (seen.size === lastCount) { stuck++; if (stuck >= 5) { stopReason = 'top'; break; } }
         else { stuck = 0; lastCount = seen.size; }
       } else if (scroller.scrollTop === before) {
         stuck++;
-        if (stuck >= 8) break;
+        if (stuck >= 8) { stopReason = 'stuck'; break; }
       } else {
         stuck = 0;
       }
@@ -470,7 +508,7 @@ async function runExport(cfg) {
     const list = filterByRange(seen, fromMs, toMs);
     const uncertain = list.filter(function (m) { return !m.certain; }).length;
     const data = {
-      app: 'Telegram 按时间段导出 v1.2.0',
+      app: 'Telegram 按时间段导出 v1.3.1',
       chat: getChatTitle(),
       range: { from: localISO(fromMs), to: localISO(toMs) },
       exported_at: localISO(Date.now()),
@@ -484,8 +522,19 @@ async function runExport(cfg) {
     };
     const fname = 'telegram-' + fileStamp(fromMs) + '-' + fileStamp(toMs).slice(9) + '.json';
     downloadJSON(data, fname);
-    overlay.done('导出完成：' + list.length + ' 条' +
-      (uncertain ? '（其中 ' + uncertain + ' 条时间不确定）' : '') + '，文件已开始下载');
+    const cov = assessCoverage(seen, fromMs);
+    let doneMsg = '导出完成：' + list.length + ' 条' +
+      (uncertain ? '（其中 ' + uncertain + ' 条时间不确定）' : '') + '，文件已开始下载';
+    if (cov.reason === 'empty') {
+      doneMsg += '<br><br><b>注意：一条都没抓到。</b>请确认已打开要导出的聊天、消息已加载出来，再试一次。';
+    } else if (cov.reason === 'gap' && stopReason !== 'reached') {
+      const hrs = cov.gapMinutes >= 60
+        ? '约 ' + Math.round(cov.gapMinutes / 60 * 10) / 10 + ' 小时'
+        : cov.gapMinutes + ' 分钟';
+      doneMsg += '<br><br><b>注意：没抓全。</b>只抓到了最近的消息，离你设定的开始时间还差 ' + hrs +
+        '。这通常是网页没把历史记录加载出来：刷新页面（F5）后再导出一次，或改用 <b>web.telegram.org/k</b> 版导出。';
+    }
+    overlay.done(doneMsg);
   } catch (e) {
     overlay.done('导出出错：' + (e && e.message ? e.message : e));
   } finally {
@@ -508,7 +557,9 @@ if (typeof module !== 'undefined' && module.exports) {
     mergeSeen: mergeSeen,
     filterByRange: filterByRange,
     minCertainTs: minCertainTs,
-    parseTitleDate: parseTitleDate
+    parseTitleDate: parseTitleDate,
+    adaptNode: adaptNode,
+    assessCoverage: assessCoverage
   };
 } else if (typeof window !== 'undefined' && window.__tgexport_cfg && !window.__tgexport_running) {
   window.__tgexport_running = true;

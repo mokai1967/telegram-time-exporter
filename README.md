@@ -1,64 +1,44 @@
-# Telegram Time Range Exporter
+# Telegram 按时间段导出 v1.3.1
 
-A Chrome extension (Manifest V3) that exports messages from Telegram Web ([web.telegram.org](https://web.telegram.org)) as JSON, filtered by an exact time range you specify.
+Chrome 扩展（Manifest V3）：在 Telegram 网页版按用户输入的精确起止时间导出聊天记录为 JSON。
 
-Telegram Web only shows hours and minutes on each message. This extension rebuilds full timestamps from the date dividers ("Today", "昨天", "October 14", … — English and Chinese both supported), auto-scrolls up from the newest message until it passes your start time, then downloads the result.
+v1.3 新增：同时支持 `web.telegram.org/a` 和 `web.telegram.org/k` 两个网页版（自动识别）。
 
-## Features
+v1.3.1 新增：导出后做完整性检查——如果只抓到最近的消息、没到达设定的开始时间，明确提示"没抓全"，并建议刷新页面或改用 K 版。
 
-- ⏱ Export any precise time range (down to the minute) as JSON
-- 🕐 Full timestamps rebuilt from date dividers + message times; prefers the `<time>` element's `datetime` / `title` when available
-- 👤 Sender names preserved — grouped message bubbles (which hide the name) are attributed back to the correct sender; your own messages are detected via the bubble's own-marker
-- ⚠️ Messages whose time couldn't be determined exactly are flagged `"uncertain_time": true` instead of being silently mislabeled
-- 📜 Zero dependencies, vanilla JS, Manifest V3
+## 文件
 
-## Install
+- `extension/` —— 扩展源码（`manifest.json` / `popup.html` / `popup.js` / `extractor.js` / `icons/`）
+- `test/run-tests.js` —— Node 单元测试（57 项，纯逻辑：日期分隔条解析、时钟解析、时间戳还原、确定性覆盖、时间段过滤、K 版气泡解析、导出完整性检查）
+- `tg-time-exporter-v1.zip` —— 打包好的扩展，发给 paul 安装用
 
-1. Download or clone this repo
-2. Open `chrome://extensions`, enable **Developer mode**
-3. Click **Load unpacked** and select the `extension/` folder
+## 原理
 
-## Usage
+- popup 收集起止时间 → `chrome.scripting` 把配置写入页面再注入 `extractor.js`
+- extractor 从聊天底部开始自动往上翻页抓取；Telegram 网页版 DOM 里消息时间只有"几点几分"，
+  用日期分隔条（今天/昨天/10月14日/October 14 等，中英都认）还原完整日期；能读到 `time` 元素的
+  `datetime` / `title` 完整时间则直接采用（最准）
+- 时间戳分"确定/不确定"两档：不确定的会被后轮抓取纠正，实在纠正不了的在 JSON 里标 `uncertain_time: true`
+- 抓到比开始时间还早的消息就停；最后按时间段过滤、排序，下载 `telegram-YYYYMMDD-HHMM-HHMM.json`
 
-1. Open the chat / group / channel on Telegram Web
-2. Click the toolbar icon, set start and end time (defaults to today 00:00 → now)
-3. Click the export button and watch the progress panel (bottom-right of the page)
-4. A `telegram-YYYYMMDD-HHMM-HHMM.json` file downloads automatically
-
-JSON shape:
+## JSON 格式
 
 ```json
 {
-  "app": "Telegram 按时间段导出 v1.2.0",
-  "chat": "Group name",
+  "app": "Telegram 按时间段导出 v1.0",
+  "chat": "群名",
   "range": { "from": "2026-10-14T22:00:00+08:00", "to": "2026-10-14T22:10:00+08:00" },
   "exported_at": "2026-10-14T22:11:00+08:00",
   "count": 42,
   "uncertain_count": 0,
   "messages": [
-    { "n": 1, "time": "2026-10-14T22:00:03+08:00", "sender": "Alice", "text": "..." }
+    { "n": 1, "time": "2026-10-14T22:00:03+08:00", "sender": "Gary", "text": "..." }
   ]
 }
 ```
 
-## Development
+## 已知限制
 
-The pure logic lives in `extension/extractor.js` and is unit-tested in Node (no DOM needed):
-
-```bash
-node test/run-tests.js
-```
-
-## Limitations
-
-- DOM selectors target web.telegram.org ("A" version); a Telegram redesign may break them
-- Very large ranges in very busy groups take a while (about one viewport per second); 50k-message safety cap
-- Media-only messages export as `[图片]` / `[视频]` / `[文件]` placeholders (captions included when present)
-
-## 中文说明
-
-在 Telegram 网页版按你输入的精确起止时间（精确到分钟）导出聊天记录为 JSON。用法：打开要导出的聊天后点工具栏图标，设好时间点导出，右下角看进度，完成后自动下载。时间戳用日期分隔条还原（中英都认）；时间不确定的消息会标 `uncertain_time: true`。安装见上面 Install 三步。
-
-## License
-
-MIT
+- 选择器同时兼容 web.telegram.org 的 A 版（`.Message`）和 K 版（`.bubble`），Telegram 大改版可能失效
+- 超大时间段（跨很多天、群很活跃）翻页较慢；5 万条保护上限
+- 未在真实 Telegram 上实测（paul 的号，只读也不碰），待 paul 装上试用反馈

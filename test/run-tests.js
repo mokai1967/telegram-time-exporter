@@ -152,5 +152,136 @@ eq(L.parseClockText(''), null, 'clock 空返回null');
   eq(L.parseTitleDate('nothing'), null, 'title 非法返回null');
 })();
 
+// ---- K 版（web.telegram.org/k）adaptNode：用假 DOM 元素 ----
+function fakeEl(o) {
+  o = o || {};
+  const classes = o.classes || [];
+  const cl = { contains: function (c) { return classes.indexOf(c) >= 0; } };
+  Object.defineProperty(cl, 'length', { get: function () { return classes.length; } });
+  for (let i = 0; i < classes.length; i++) cl[i] = classes[i];
+  const qmap = o.q || {};
+  return {
+    classList: cl,
+    innerText: o.innerText || '',
+    querySelector: function (sel) {
+      const parts = String(sel).split(',');
+      for (let i = 0; i < parts.length; i++) {
+        const k = parts[i].trim();
+        if (qmap[k]) return qmap[k];
+      }
+      return null;
+    },
+    getAttribute: function (n) { return ((o.attrs || {})[n]) || null; }
+  };
+}
+function fakeTime(attrs, text) {
+  attrs = attrs || {};
+  return {
+    innerText: text || '',
+    title: attrs.title || '',
+    getAttribute: function (n) { return attrs[n] || null; }
+  };
+}
+(function () {
+  // K 版他人消息：.bubble.is-in + .peer-title + .message + span.time[title]
+  const el = fakeEl({
+    classes: ['bubble', 'is-in', 'is-group-first'],
+    innerText: 'Gary\n早\n06:33',
+    attrs: { 'data-mid': '777' },
+    q: {
+      '.peer-title': { innerText: 'Gary' },
+      '.message': { innerText: '早' },
+      '.time': fakeTime({ title: 'October 16, 2026 at 06:33' }, '06:33')
+    }
+  });
+  const n = L.adaptNode(el, nowMs);
+  eq(n.sender, 'Gary', 'K 他人消息发送人');
+  eq(n.text, '早', 'K 消息正文');
+  eq(n.isOwn, false, 'K 他人消息非本人');
+  eq(n.key, 'mid_777', 'K data-mid 做 key');
+  ok(n.fullMs !== null && new Date(n.fullMs).getHours() === 6 &&
+     new Date(n.fullMs).getMinutes() === 33 && new Date(n.fullMs).getDate() === 16,
+     'K 时间 title 解析出完整时间');
+})();
+(function () {
+  // K 版自己的消息：is-out → 本人
+  const el = fakeEl({
+    classes: ['bubble', 'is-out'],
+    innerText: '收到\n06:35',
+    attrs: { 'data-mid': '778' },
+    q: {
+      '.message': { innerText: '收到' },
+      '.time': fakeTime({ title: 'October 16, 2026 at 06:35' }, '06:35')
+    }
+  });
+  const n = L.adaptNode(el, nowMs);
+  eq(n.isOwn, true, 'K is-out 识别为本人');
+  eq(n.text, '收到', 'K 本人消息正文');
+})();
+(function () {
+  // K 版日期分隔条：.bubble.is-date
+  const n = L.adaptNode(fakeEl({ classes: ['bubble', 'is-date'], innerText: 'October 16' }), nowMs);
+  eq(n.isDivider, true, 'K 日期分隔条识别');
+  eq(n.dividerText, 'October 16', 'K 分隔条文字');
+})();
+(function () {
+  // K 版服务消息（如入群通知）：.bubble.is-service → 跳过
+  const n = L.adaptNode(fakeEl({ classes: ['bubble', 'is-service'], innerText: 'Gary 加入了群组' }), nowMs);
+  eq(n.skip, true, 'K 服务消息跳过');
+})();
+(function () {
+  // K 版 data-timestamp 兜底：unix 秒
+  const el = fakeEl({
+    classes: ['bubble', 'is-in'],
+    attrs: { 'data-mid': '779' },
+    q: {
+      '.peer-title': { innerText: 'YanG' },
+      '.message': { innerText: 'ok' },
+      '.time': fakeTime({ 'data-timestamp': '1729056780' }, '06:33')
+    }
+  });
+  const n = L.adaptNode(el, nowMs);
+  eq(n.fullMs, 1729056780 * 1000, 'K data-timestamp 解析');
+})();
+(function () {
+  // K 版只有时钟文字、无完整时间时：clockText 兜底给分隔条逻辑用
+  const el = fakeEl({
+    classes: ['bubble', 'is-in'],
+    attrs: { 'data-mid': '780' },
+    q: {
+      '.peer-title': { innerText: 'YanG' },
+      '.message': { innerText: 'ok' },
+      '.time': fakeTime({}, '06:33')
+    }
+  });
+  const n = L.adaptNode(el, nowMs);
+  eq(n.fullMs, null, 'K 无完整时间时 fullMs 为空');
+  eq(n.clockText, '06:33', 'K 时钟文字提取');
+})();
+
+// ---- assessCoverage：抓完后的完整性检查 ----
+(function () {
+  const base = today0;
+  // 正常到达：最早的消息早于开始时间
+  let seen = new Map();
+  L.mergeSeen(seen, [
+    { key: '1', sender: 'u', text: 'a', tsMs: base + 10 * 3600000, certain: true },
+    { key: '2', sender: 'u', text: 'b', tsMs: base + 2 * 3600000, certain: true },
+  ]);
+  let c = L.assessCoverage(seen, base + 10 * 3600000);
+  eq(c.ok, true, 'coverage 正常到达');
+  eq(c.reason, 'ok', 'coverage reason ok');
+  // 没抓全：最早的消息比开始时间晚 2 小时
+  c = L.assessCoverage(seen, base);
+  eq(c.ok, false, 'coverage 发现缺口');
+  eq(c.reason, 'gap', 'coverage reason gap');
+  eq(c.gapMinutes, 120, 'coverage 缺口 120 分钟');
+  eq(c.count, 2, 'coverage 条数');
+  // 一条都没抓到
+  c = L.assessCoverage(new Map(), base);
+  eq(c.ok, false, 'coverage 空');
+  eq(c.reason, 'empty', 'coverage reason empty');
+})();
+
 console.log('\n通过 ' + pass + ' / ' + (pass + fail) + (fail ? ('，失败 ' + fail) : '，全部通过'));
 process.exit(fail ? 1 : 0);
