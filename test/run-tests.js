@@ -283,5 +283,15 @@ function fakeTime(attrs, text) {
   eq(c.reason, 'empty', 'coverage reason empty');
 })();
 
+// ---- describeStopReason：停止原因人话 ----
+(function () {
+  eq(L.describeStopReason('reached'), '已翻到设定的开始时间，抓全了', 'stop reached');
+  eq(L.describeStopReason('top').indexOf('页面顶部') >= 0, true, 'stop top');
+  eq(L.describeStopReason('stuck').indexOf('卡住') >= 0, true, 'stop stuck');
+  eq(L.describeStopReason('max').indexOf('上限') >= 0, true, 'stop max');
+  eq(L.describeStopReason('rounds').indexOf('上限') >= 0, true, 'stop rounds');
+  eq(L.describeStopReason('weird').indexOf('weird') >= 0, true, 'stop 未知回退');
+})();
+
 console.log('\n通过 ' + pass + ' / ' + (pass + fail) + (fail ? ('，失败 ' + fail) : '，全部通过'));
 process.exit(fail ? 1 : 0);

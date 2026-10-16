@@ -1,4 +1,4 @@
-# Telegram 按时间段导出 v1.3.1
+# Telegram 按时间段导出 v1.3.2
 
 Chrome 扩展（Manifest V3）：在 Telegram 网页版按用户输入的精确起止时间导出聊天记录为 JSON。
 
@@ -6,10 +6,12 @@ v1.3 新增：同时支持 `web.telegram.org/a` 和 `web.telegram.org/k` 两个�
 
 v1.3.1 新增：导出后做完整性检查——如果只抓到最近的消息、没到达设定的开始时间，明确提示"没抓全"，并建议刷新页面或改用 K 版。
 
+v1.3.2 新增：到顶卡住时自动"再踢一脚"（往下滚一屏再回顶部，最多 3 次），给客户端多一次加载历史的机会；停止原因（抓全/到顶/卡住）用人话显示在完成提示里，并写进 JSON 的 `stop_reason` 字段。
+
 ## 文件
 
 - `extension/` —— 扩展源码（`manifest.json` / `popup.html` / `popup.js` / `extractor.js` / `icons/`）
-- `test/run-tests.js` —— Node 单元测试（57 项，纯逻辑：日期分隔条解析、时钟解析、时间戳还原、确定性覆盖、时间段过滤、K 版气泡解析、导出完整性检查）
+- `test/run-tests.js` —— Node 单元测试（63 项，纯逻辑：日期分隔条解析、时钟解析、时间戳还原、确定性覆盖、时间段过滤、K 版气泡解析、导出完整性检查、停止原因说明）
 - `tg-time-exporter-v1.zip` —— 打包好的扩展，发给 paul 安装用
 
 ## 原理

@@ -1,4 +1,16 @@
-/* Telegram 按时间段导出 v1.3.1
+/* 停止原因的人话解释（显示在完成提示里，也便于排查"为啥没抓全"） */
+function describeStopReason(reason) {
+  return {
+    reached: '已翻到设定的开始时间，抓全了',
+    top: '翻到页面顶部：页面没有加载出更早的历史（可刷新页面后重试）',
+    stuck: '页面滚动卡住，没能继续往上翻',
+    max: '达到消息数上限保护而停止',
+    rounds: '达到轮数上限保护而停止',
+    unknown: '未知原因停止'
+  }[reason] || ('未知原因停止(' + reason + ')');
+}
+
+/* Telegram 按时间段导出 v1.3.2
  * 注入到 web.telegram.org 页面中运行：按用户指定的精确时间段收集消息，打包下载 JSON。
  * 支持 A 版（web.telegram.org/a，.Message）和 K 版（web.telegram.org/k，.bubble）两种网页版。
  * 在浏览器里：popup 通过 chrome.scripting 先写入 window.__tgexport_cfg 再注入本文件，自动运行。
@@ -455,9 +467,8 @@ async function runExport(cfg) {
     const MAX_MSGS = 50000;
     let stuck = 0, lastCount = 0, rounds = 0, stopReason = 'unknown';
 
-    while (!cancelled) {
-      rounds++;
-      // 消息气泡 + 日期分隔条，按文档顺序合并后统一走一遍
+    // 单轮收集：把当前页面上的消息气泡 + 日期分隔条统一走一遍
+    async function collectOnce() {
       // A 版：.Message；K 版：.bubble（去掉日期分隔条，服务消息由 adaptNode 跳过）
       const msgEls = client === 'K'
         ? scroller.querySelectorAll('.bubble:not(.is-date)')
@@ -469,6 +480,28 @@ async function runExport(cfg) {
         try { const n = adaptNode(el, nowMs); if (n) nodes.push(n); } catch (e) { /* 单条解析失败就跳过 */ }
       }
       mergeSeen(seen, walkNodes(nodes, state, nowMs));
+      return seen.size;
+    }
+
+    // 在顶部卡住时给客户端"再踢一脚"：往下滚一屏再回到顶部等一会儿，
+    // 有些客户端这样才会重新触发历史加载。最多试 3 次，返回是否捞到了新消息。
+    let nudges = 0;
+    async function nudgeTop() {
+      if (nudges >= 3) return false;
+      nudges++;
+      overlay.progress('已到页面顶部，尝试再加载一次更早的历史（第 ' + nudges + ' 次）…');
+      const before = seen.size;
+      scroller.scrollTop = scroller.clientHeight;
+      await sleep(1500);
+      scroller.scrollTop = 0;
+      await sleep(2500);
+      await collectOnce();
+      return seen.size > before;
+    }
+
+    while (!cancelled) {
+      rounds++;
+      await collectOnce();
 
       const minC = minCertainTs(seen);
       let prog = '【' + client + ' 版】已收集 ' + seen.size + ' 条' +
@@ -490,7 +523,14 @@ async function runExport(cfg) {
       await sleep(900);
 
       if (scroller.scrollTop <= 0) {
-        if (seen.size === lastCount) { stuck++; if (stuck >= 5) { stopReason = 'top'; break; } }
+        if (seen.size === lastCount) {
+          stuck++;
+          if (stuck >= 5) {
+            // 到顶了：先踢一脚看客户端能不能再吐出更早的历史，实在不行才停
+            if (await nudgeTop()) { stuck = 0; lastCount = seen.size; }
+            else { stopReason = 'top'; break; }
+          }
+        }
         else { stuck = 0; lastCount = seen.size; }
       } else if (scroller.scrollTop === before) {
         stuck++;
@@ -508,12 +548,13 @@ async function runExport(cfg) {
     const list = filterByRange(seen, fromMs, toMs);
     const uncertain = list.filter(function (m) { return !m.certain; }).length;
     const data = {
-      app: 'Telegram 按时间段导出 v1.3.1',
+      app: 'Telegram 按时间段导出 v1.3.2',
       chat: getChatTitle(),
       range: { from: localISO(fromMs), to: localISO(toMs) },
       exported_at: localISO(Date.now()),
       count: list.length,
       uncertain_count: uncertain,
+      stop_reason: stopReason,
       messages: list.map(function (m, i) {
         const o = { n: i + 1, time: localISO(m.tsMs), sender: m.sender, text: m.text };
         if (!m.certain) o.uncertain_time = true;
@@ -532,7 +573,10 @@ async function runExport(cfg) {
         ? '约 ' + Math.round(cov.gapMinutes / 60 * 10) / 10 + ' 小时'
         : cov.gapMinutes + ' 分钟';
       doneMsg += '<br><br><b>注意：没抓全。</b>只抓到了最近的消息，离你设定的开始时间还差 ' + hrs +
-        '。这通常是网页没把历史记录加载出来：刷新页面（F5）后再导出一次，或改用 <b>web.telegram.org/k</b> 版导出。';
+        '。' + describeStopReason(stopReason) +
+        '。建议：刷新页面（F5）让历史加载出来后再导出一次，或改用 <b>web.telegram.org/k</b> 版。';
+    } else if (stopReason !== 'reached') {
+      doneMsg += '<br><br>停止原因：' + describeStopReason(stopReason);
     }
     overlay.done(doneMsg);
   } catch (e) {
@@ -559,7 +603,8 @@ if (typeof module !== 'undefined' && module.exports) {
     minCertainTs: minCertainTs,
     parseTitleDate: parseTitleDate,
     adaptNode: adaptNode,
-    assessCoverage: assessCoverage
+    assessCoverage: assessCoverage,
+    describeStopReason: describeStopReason
   };
 } else if (typeof window !== 'undefined' && window.__tgexport_cfg && !window.__tgexport_running) {
   window.__tgexport_running = true;
