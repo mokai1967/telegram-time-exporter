@@ -293,5 +293,24 @@ function fakeTime(attrs, text) {
   eq(L.describeStopReason('weird').indexOf('weird') >= 0, true, 'stop 未知回退');
 })();
 
+// ---- snapDebug：停止现场快照（用假 scroller，不碰 DOM） ----
+(function () {
+  const fakeScroller = { scrollTop: 0, scrollHeight: 800, clientHeight: 600 };
+  const seen = new Map();
+  const base = today0;
+  L.mergeSeen(seen, [{ key: '1', sender: 'u', text: 'a', tsMs: base + 3600000, certain: true }]);
+  const d = L.snapDebug(fakeScroller, seen, 42, 3, 1, 'top');
+  eq(d.stop_reason, 'top', 'snap stop_reason');
+  eq(d.rounds, 42, 'snap rounds');
+  eq(d.stuck_rounds, 3, 'snap stuck');
+  eq(d.nudge_tries, 1, 'snap nudges');
+  eq(d.collected_total, 1, 'snap collected');
+  eq(d.scrollable, true, 'snap scrollable=true');
+  eq(d.oldest_collected, L.localISO(base + 3600000), 'snap oldest');
+  const d2 = L.snapDebug({ scrollTop: 0, scrollHeight: 500, clientHeight: 600 }, new Map(), 0, 0, 0, 'loading');
+  eq(d2.scrollable, false, 'snap scrollable=false');
+  eq(d2.oldest_collected, null, 'snap oldest null');
+})();
+
 console.log('\n通过 ' + pass + ' / ' + (pass + fail) + (fail ? ('，失败 ' + fail) : '，全部通过'));
 process.exit(fail ? 1 : 0);

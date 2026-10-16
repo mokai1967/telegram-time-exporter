@@ -1,16 +1,4 @@
-/* 停止原因的人话解释（显示在完成提示里，也便于排查"为啥没抓全"） */
-function describeStopReason(reason) {
-  return {
-    reached: '已翻到设定的开始时间，抓全了',
-    top: '翻到页面顶部：页面没有加载出更早的历史（可刷新页面后重试）',
-    stuck: '页面滚动卡住，没能继续往上翻',
-    max: '达到消息数上限保护而停止',
-    rounds: '达到轮数上限保护而停止',
-    unknown: '未知原因停止'
-  }[reason] || ('未知原因停止(' + reason + ')');
-}
-
-/* Telegram 按时间段导出 v1.3.2
+/* Telegram 按时间段导出 v1.3.3
  * 注入到 web.telegram.org 页面中运行：按用户指定的精确时间段收集消息，打包下载 JSON。
  * 支持 A 版（web.telegram.org/a，.Message）和 K 版（web.telegram.org/k，.bubble）两种网页版。
  * 在浏览器里：popup 通过 chrome.scripting 先写入 window.__tgexport_cfg 再注入本文件，自动运行。
@@ -18,6 +6,39 @@ function describeStopReason(reason) {
  */
 (function () {
 'use strict';
+
+/* 停止原因的人话解释（显示在完成提示里，也便于排查"为啥没抓全"） */
+function describeStopReason(reason) {
+  return {
+    reached: '已翻到设定的开始时间，抓全了',
+    top: '翻到页面顶部：页面没有加载出更早的历史（可刷新页面后重试）',
+    stuck: '页面滚动卡住，没能继续往上翻',
+    loading: '页面长时间未能加载出更多历史（已等待约20秒），可能客户端卡住或网络问题',
+    max: '达到消息数上限保护而停止',
+    rounds: '达到轮数上限保护而停止',
+    unknown: '未知原因停止'
+  }[reason] || ('未知原因停止(' + reason + ')');
+}
+
+/* 停止时的现场快照：写进 JSON，方便排查"有内容却停了"这类问题 */
+function snapDebug(scroller, seen, rounds, stuck, nudges, stopReason) {
+  const d = {
+    stop_reason: stopReason,
+    rounds: rounds,
+    stuck_rounds: stuck,
+    nudge_tries: nudges,
+    collected_total: seen.size
+  };
+  try {
+    d.scrollTop = scroller.scrollTop;
+    d.scrollHeight = scroller.scrollHeight;
+    d.clientHeight = scroller.clientHeight;
+    d.scrollable = scroller.scrollHeight > scroller.clientHeight + 100;
+  } catch (e) { d.scrollable = null; }
+  const minC = minCertainTs(seen);
+  d.oldest_collected = minC !== null ? localISO(minC) : null;
+  return d;
+}
 
 /* ================= 纯逻辑（浏览器 / Node 通用） ================= */
 
@@ -465,7 +486,7 @@ async function runExport(cfg) {
     const client = detectClient(scroller);
     const STOP_MARGIN = 10 * 60000;
     const MAX_MSGS = 50000;
-    let stuck = 0, lastCount = 0, rounds = 0, stopReason = 'unknown';
+    let stuck = 0, lastCount = 0, rounds = 0, stopReason = 'unknown', unscrollable = 0;
 
     // 单轮收集：把当前页面上的消息气泡 + 日期分隔条统一走一遍
     async function collectOnce() {
@@ -519,8 +540,19 @@ async function runExport(cfg) {
       if (rounds > 3000) { stopReason = 'rounds'; break; }
 
       const before = scroller.scrollTop;
+      const scrollableNow = scroller.scrollHeight > scroller.clientHeight + 100;
       scroller.scrollTop = before - Math.floor(scroller.clientHeight * 0.8);
-      await sleep(900);
+      await sleep(1100);
+
+      if (!scrollableNow) {
+        // 容器暂时不可滚动：客户端可能正在重新渲染或拉取历史。
+        // 此时给 scrollTop 赋值会被浏览器忽略，不能算"卡住"，耐心等，不计入 stuck。
+        unscrollable++;
+        overlay.progress(prog + '（页面正在加载历史，等待 ' + unscrollable + ' 秒…）');
+        if (unscrollable > 18) { stopReason = 'loading'; break; }
+        continue;
+      }
+      unscrollable = 0;
 
       if (scroller.scrollTop <= 0) {
         if (seen.size === lastCount) {
@@ -548,13 +580,14 @@ async function runExport(cfg) {
     const list = filterByRange(seen, fromMs, toMs);
     const uncertain = list.filter(function (m) { return !m.certain; }).length;
     const data = {
-      app: 'Telegram 按时间段导出 v1.3.2',
+      app: 'Telegram 按时间段导出 v1.3.3',
       chat: getChatTitle(),
       range: { from: localISO(fromMs), to: localISO(toMs) },
       exported_at: localISO(Date.now()),
       count: list.length,
       uncertain_count: uncertain,
       stop_reason: stopReason,
+      debug: snapDebug(scroller, seen, rounds, stuck, nudges, stopReason),
       messages: list.map(function (m, i) {
         const o = { n: i + 1, time: localISO(m.tsMs), sender: m.sender, text: m.text };
         if (!m.certain) o.uncertain_time = true;
@@ -604,7 +637,8 @@ if (typeof module !== 'undefined' && module.exports) {
     parseTitleDate: parseTitleDate,
     adaptNode: adaptNode,
     assessCoverage: assessCoverage,
-    describeStopReason: describeStopReason
+    describeStopReason: describeStopReason,
+    snapDebug: snapDebug
   };
 } else if (typeof window !== 'undefined' && window.__tgexport_cfg && !window.__tgexport_running) {
   window.__tgexport_running = true;
