@@ -1,4 +1,4 @@
-/* Telegram 按时间段导出 v1.3.3
+/* Telegram 按时间段导出 v1.3.4
  * 注入到 web.telegram.org 页面中运行：按用户指定的精确时间段收集消息，打包下载 JSON。
  * 支持 A 版（web.telegram.org/a，.Message）和 K 版（web.telegram.org/k，.bubble）两种网页版。
  * 在浏览器里：popup 通过 chrome.scripting 先写入 window.__tgexport_cfg 再注入本文件，自动运行。
@@ -520,6 +520,17 @@ async function runExport(cfg) {
       return seen.size > before;
     }
 
+    // 自动续跑：Telegram 网页版加载更早历史需要时间，第一轮经常在"历史还没加载完"
+    // 时就误判到顶而提前停止（比如只翻到凌晨2点）。此时等一会儿让客户端把历史加载
+    // 出来，自动再跑一轮（已收集的消息保留），直到抓全或确认真的到顶。
+    const MAX_ATTEMPTS = 3;
+    const RETRY_WAIT_MS = 15000;
+    let attempt = 0;
+    let autoResumed = 0;
+    while (!cancelled && attempt < MAX_ATTEMPTS) {
+      attempt++;
+      const seenBeforeAttempt = seen.size;
+      stopReason = 'unknown';
     while (!cancelled) {
       rounds++;
       await collectOnce();
@@ -570,6 +581,19 @@ async function runExport(cfg) {
       } else {
         stuck = 0;
       }
+    } // 内层 while 结束：一轮翻页完成
+      if (cancelled || stopReason === 'reached') break;
+      // 这一轮没抓全？判断是不是"历史还没加载完"造成的缺口
+      const covNow = assessCoverage(seen, fromMs);
+      if (covNow.reason !== 'gap') break;          // 没缺口：max/rounds 等保护性停止，不重跑
+      if (seen.size === seenBeforeAttempt) break;  // 这一轮一条新消息都没捞到：真的到顶了
+      if (attempt >= MAX_ATTEMPTS) break;
+      autoResumed++;
+      const minC2 = minCertainTs(seen);
+      overlay.progress('已翻到 ' + (minC2 !== null ? localISO(minC2).slice(5, 16).replace('T', ' ') : '—') +
+        '，更早的历史还没加载出来，' + (RETRY_WAIT_MS / 1000) + ' 秒后自动继续第 ' + (attempt + 1) + ' 轮…');
+      await sleep(RETRY_WAIT_MS);
+      stuck = 0; lastCount = seen.size; nudges = 0; unscrollable = 0;
     }
 
     if (cancelled) {
@@ -580,7 +604,7 @@ async function runExport(cfg) {
     const list = filterByRange(seen, fromMs, toMs);
     const uncertain = list.filter(function (m) { return !m.certain; }).length;
     const data = {
-      app: 'Telegram 按时间段导出 v1.3.3',
+      app: 'Telegram 按时间段导出 v1.3.4',
       chat: getChatTitle(),
       range: { from: localISO(fromMs), to: localISO(toMs) },
       exported_at: localISO(Date.now()),
@@ -595,6 +619,8 @@ async function runExport(cfg) {
       })
     };
     const fname = 'telegram-' + fileStamp(fromMs) + '-' + fileStamp(toMs).slice(9) + '.json';
+    data.debug.auto_resumed = autoResumed;
+    data.debug.attempts = attempt;
     downloadJSON(data, fname);
     const cov = assessCoverage(seen, fromMs);
     let doneMsg = '导出完成：' + list.length + ' 条' +
@@ -607,6 +633,7 @@ async function runExport(cfg) {
         : cov.gapMinutes + ' 分钟';
       doneMsg += '<br><br><b>注意：没抓全。</b>只抓到了最近的消息，离你设定的开始时间还差 ' + hrs +
         '。' + describeStopReason(stopReason) +
+        (autoResumed ? '（已自动续跑 ' + autoResumed + ' 次仍没能抓全）' : '') +
         '。建议：刷新页面（F5）让历史加载出来后再导出一次，或改用 <b>web.telegram.org/k</b> 版。';
     } else if (stopReason !== 'reached') {
       doneMsg += '<br><br>停止原因：' + describeStopReason(stopReason);
